@@ -127,3 +127,74 @@ class RestyResolver(Resolver):
             return self.collection_endpoint_name if is_collection_endpoint else method.lower()
 
         return '{}.{}'.format(get_controller_name(), get_function_name())
+
+
+class MethodViewResolver(RestyResolver):
+    """
+    Resolves endpoint functions based on Flask's MethodView semantics, e.g. ::
+
+            paths:
+                /foo_bar:
+                    get:
+                        # Implied function call: api.FooBarView().get
+
+            class FooBarView(MethodView):
+                def get(self):
+                    return ...
+                def post(self):
+                    return ...
+    """
+
+    def __init__(self, default_module_name, collection_endpoint_name='search'):
+        """
+        :param default_module_name: Default module name for operations
+        :type default_module_name: str
+        """
+        RestyResolver.__init__(self, default_module_name, collection_endpoint_name)
+
+    def resolve(self, operation):
+        """
+        Default operation resolver
+
+        :type operation: connexion.operations.AbstractOperation
+        """
+        operation_id = self.resolve_operation_id(operation)
+        return Resolution(self.resolve_function_from_operation_id(operation, operation_id), operation_id)
+
+    def resolve_operation_id(self, operation):
+        """
+        Resolves the operationId using REST semantics unless explicitly configured in the spec
+
+        :type operation: connexion.operations.AbstractOperation
+        """
+        if operation.operation_id:
+            return RestyResolver.resolve_operation_id(self, operation)
+
+        operation_id = self.resolve_operation_id_using_rest_semantics(operation)
+        module, path, meth = operation_id.rsplit('.', 2)
+        path = path[0].upper() + path[1:]
+        view = "{}.{}View".format(module, path)
+
+        return "{}.{}".format(view, meth)
+
+    def resolve_function_from_operation_id(self, operation, operation_id):
+        """
+        Invokes the function_resolver
+
+        :type operation_id: str
+        """
+        logging.debug(operation_id)
+        try:
+            module_name, view_name, meth_name = operation_id.rsplit('.', 2)
+            if operation.operation_id and not view_name.endswith('View'):
+                return self.function_resolver(operation_id)
+            mod = __import__(module_name, fromlist=[view_name])
+            view_cls = getattr(mod, view_name)
+            view = view_cls()
+            func = getattr(view, meth_name)
+            return func
+        except ImportError as e:
+            msg = 'Cannot resolve operationId "{}"! Import error was "{}"'.format(operation_id, str(e))
+            raise ResolverError(msg, sys.exc_info())
+        except (AttributeError, ValueError) as e:
+            raise ResolverError(str(e), sys.exc_info())
